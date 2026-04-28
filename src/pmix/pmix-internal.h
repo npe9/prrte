@@ -28,6 +28,9 @@
 #include "src/include/hash_string.h"
 #include "src/mca/mca.h"
 #include "src/threads/pmix_threads.h"
+#ifdef HAVE_LITHE
+#include <lithe/condvar.h>
+#endif
 #include "src/util/error.h"
 #include "src/util/pmix_error.h"
 #include "src/util/pmix_name_fns.h"
@@ -76,7 +79,11 @@ PMIX_CLASS_DECLARATION(prte_info_array_item_t);
 
 typedef struct {
     pmix_mutex_t mutex;
+#ifdef HAVE_LITHE
+    lithe_condvar_t cond;
+#else
     pthread_cond_t cond;
+#endif
     volatile bool active;
     int status;
     char *msg;
@@ -104,8 +111,23 @@ static inline __prte_attribute_always_inline__ void pmix_proc_hton_intr(pmix_pro
 #    define PMIX_PROC_HTON(guid)
 #endif
 
+#ifdef HAVE_LITHE
+#define prte_pmix_condition_wait(a, b) lithe_condvar_wait(a, &(b)->m_lock_lithe)
+#else
 #define prte_pmix_condition_wait(a, b) pthread_cond_wait(a, &(b)->m_lock_pthread)
+#endif
 
+#ifdef HAVE_LITHE
+#define PRTE_PMIX_CONSTRUCT_LOCK(l)                \
+    do {                                           \
+        PMIX_CONSTRUCT(&(l)->mutex, pmix_mutex_t); \
+        lithe_condvar_init(&(l)->cond);            \
+        (l)->active = true;                        \
+        (l)->status = 0;                           \
+        (l)->msg = NULL;                           \
+        PMIX_POST_OBJECT((l));                     \
+    } while (0)
+#else
 #define PRTE_PMIX_CONSTRUCT_LOCK(l)                \
     do {                                           \
         PMIX_CONSTRUCT(&(l)->mutex, pmix_mutex_t); \
@@ -115,7 +137,18 @@ static inline __prte_attribute_always_inline__ void pmix_proc_hton_intr(pmix_pro
         (l)->msg = NULL;                           \
         PMIX_POST_OBJECT((l));                     \
     } while (0)
+#endif
 
+#ifdef HAVE_LITHE
+#define PRTE_PMIX_DESTRUCT_LOCK(l)        \
+    do {                                  \
+        PMIX_ACQUIRE_OBJECT((l));         \
+        PMIX_DESTRUCT(&(l)->mutex);       \
+        if (NULL != (l)->msg) {           \
+            free((l)->msg);               \
+        }                                 \
+    } while (0)
+#else
 #define PRTE_PMIX_DESTRUCT_LOCK(l)        \
     do {                                  \
         PMIX_ACQUIRE_OBJECT((l));         \
@@ -125,6 +158,7 @@ static inline __prte_attribute_always_inline__ void pmix_proc_hton_intr(pmix_pro
             free((l)->msg);               \
         }                                 \
     } while (0)
+#endif
 
 #if PRTE_ENABLE_DEBUG
 #    define PRTE_PMIX_ACQUIRE_THREAD(lck)                                       \
@@ -168,7 +202,14 @@ static inline __prte_attribute_always_inline__ void pmix_proc_hton_intr(pmix_pro
         } while (0)
 #endif
 
-#if PRTE_ENABLE_DEBUG
+#ifdef HAVE_LITHE
+#    define PRTE_PMIX_RELEASE_THREAD(lck)                   \
+        do {                                                \
+            (lck)->active = false;                          \
+            lithe_condvar_broadcast(&(lck)->cond);          \
+            pmix_mutex_unlock(&(lck)->mutex);               \
+        } while (0)
+#elif PRTE_ENABLE_DEBUG
 #    define PRTE_PMIX_RELEASE_THREAD(lck)                                     \
         do {                                                                  \
             (lck)->active = false;                                            \
@@ -185,6 +226,16 @@ static inline __prte_attribute_always_inline__ void pmix_proc_hton_intr(pmix_pro
         } while (0)
 #endif
 
+#ifdef HAVE_LITHE
+#define PRTE_PMIX_WAKEUP_THREAD(lck)              \
+    do {                                          \
+        pmix_mutex_lock(&(lck)->mutex);           \
+        (lck)->active = false;                    \
+        PMIX_POST_OBJECT(lck);                    \
+        lithe_condvar_broadcast(&(lck)->cond);    \
+        pmix_mutex_unlock(&(lck)->mutex);         \
+    } while (0)
+#else
 #define PRTE_PMIX_WAKEUP_THREAD(lck)          \
     do {                                      \
         pmix_mutex_lock(&(lck)->mutex);       \
@@ -193,6 +244,7 @@ static inline __prte_attribute_always_inline__ void pmix_proc_hton_intr(pmix_pro
         pthread_cond_broadcast(&(lck)->cond); \
         pmix_mutex_unlock(&(lck)->mutex);     \
     } while (0)
+#endif
 
 /*
  * Count the hash for the the external RM
