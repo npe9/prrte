@@ -117,6 +117,22 @@ static inline __prte_attribute_always_inline__ void pmix_proc_hton_intr(pmix_pro
 #define prte_pmix_condition_wait(a, b) pthread_cond_wait(a, &(b)->m_lock_pthread)
 #endif
 
+/*
+ * Under Lithe, lithe_condvar_wait blocks the context while temporarily unlocking the
+ * PMIx mutex; that races nested Lithe progress (same pattern as PMIX_THREAD_COND_WAIT
+ * in OpenPMIx). Spin with unlock+yield+lock instead.
+ */
+#ifdef HAVE_LITHE
+#    define PRTE_PMIX_THREAD_COND_WAIT(lck)        \
+        do {                                       \
+            pmix_mutex_unlock(&(lck)->mutex);      \
+            lithe_context_yield();                 \
+            pmix_mutex_lock(&(lck)->mutex);        \
+        } while (0)
+#else
+#    define PRTE_PMIX_THREAD_COND_WAIT(lck) prte_pmix_condition_wait(&(lck)->cond, &(lck)->mutex)
+#endif
+
 #ifdef HAVE_LITHE
 #define PRTE_PMIX_CONSTRUCT_LOCK(l)                \
     do {                                           \
@@ -165,7 +181,7 @@ static inline __prte_attribute_always_inline__ void pmix_proc_hton_intr(pmix_pro
         do {                                                                    \
             pmix_mutex_lock(&(lck)->mutex);                                     \
             while ((lck)->active) {                                             \
-                prte_pmix_condition_wait(&(lck)->cond, &(lck)->mutex);          \
+                PRTE_PMIX_THREAD_COND_WAIT(lck);                                \
             }                                                                   \
             (lck)->active = true;                                               \
         } while (0)
@@ -174,7 +190,7 @@ static inline __prte_attribute_always_inline__ void pmix_proc_hton_intr(pmix_pro
         do {                                                           \
             pmix_mutex_lock(&(lck)->mutex);                            \
             while ((lck)->active) {                                    \
-                prte_pmix_condition_wait(&(lck)->cond, &(lck)->mutex); \
+                PRTE_PMIX_THREAD_COND_WAIT(lck);                       \
             }                                                          \
             (lck)->active = true;                                      \
         } while (0)
@@ -185,7 +201,7 @@ static inline __prte_attribute_always_inline__ void pmix_proc_hton_intr(pmix_pro
         do {                                                                    \
             pmix_mutex_lock(&(lck)->mutex);                                     \
             while ((lck)->active) {                                             \
-                prte_pmix_condition_wait(&(lck)->cond, &(lck)->mutex);          \
+                PRTE_PMIX_THREAD_COND_WAIT(lck);                                \
             }                                                                   \
             PMIX_ACQUIRE_OBJECT(&lck);                                          \
             pmix_mutex_unlock(&(lck)->mutex);                                   \
@@ -195,7 +211,7 @@ static inline __prte_attribute_always_inline__ void pmix_proc_hton_intr(pmix_pro
         do {                                                           \
             pmix_mutex_lock(&(lck)->mutex);                            \
             while ((lck)->active) {                                    \
-                prte_pmix_condition_wait(&(lck)->cond, &(lck)->mutex); \
+                PRTE_PMIX_THREAD_COND_WAIT(lck);                       \
             }                                                          \
             PMIX_ACQUIRE_OBJECT(lck);                                  \
             pmix_mutex_unlock(&(lck)->mutex);                          \
